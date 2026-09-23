@@ -31,6 +31,14 @@ class _QRFormScreenState extends ConsumerState<QRFormScreen> {
   final _emailController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    // Warm up the interstitial so it is ready when the user taps
+    // "Generate QR Code" (every generation shows an interstitial).
+    ref.read(adServiceProvider).preloadQrCreateInterstitialAd();
+  }
+
+  @override
   void dispose() {
     _urlController.dispose();
     _textController.dispose();

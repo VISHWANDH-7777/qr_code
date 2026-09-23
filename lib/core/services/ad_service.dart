@@ -27,6 +27,22 @@ class AdService {
   static bool _isSdkInitialized = false;
   bool _isAdShowing = false;
 
+  Timer? _consentFallbackTimer;
+  int _consentCheckAttempts = 0;
+
+  /// How long to wait between consent state re-checks while the UMP callbacks
+  /// have not produced a usable consent state yet.
+  static const Duration _consentRecheckDelay = Duration(seconds: 5);
+
+  /// Maximum number of consent state re-checks before giving up (ads stay
+  /// disabled, which is the correct behaviour when consent is required).
+  static const int _maxConsentCheckAttempts = 12;
+
+  /// Device ids (added in AdMob > Settings > Test devices) that should always
+  /// receive test ads. Leave empty to disable test device configuration.
+  /// These are only applied in debug builds.
+  static const List<String> debugTestDeviceIds = <String>[];
+
   static const String _boxName = 'app_state';
   static const String _qrCreationCountKey = 'qrCreationCount';
   static const String _successfulScanCountKey = 'successfulScanCount';
@@ -47,12 +63,28 @@ class AdService {
     if (_isSdkInitialized) {
       _preloadAllAds();
       // Ensure the provider state matches the static boolean if already initialized
-      Future.microtask(() {
-        _ref.read(adInitializationProvider.notifier).state = true;
-      });
+      _markSdkInitialized();
     } else {
       initializeConsentAndAds();
     }
+  }
+
+  /// Whether the Mobile Ads SDK has finished initializing. Ads can only be
+  /// created after this returns true.
+  bool get isSdkReady => _isSdkInitialized;
+
+  /// Notifies the UI that the SDK is ready so banners/Hive backed widgets can
+  /// start requesting ads.
+  ///
+  /// Riverpod does not allow a provider to change the state of another provider
+  /// while it is being created, therefore this is deferred to the next
+  /// microtask.
+  void _markSdkInitialized() {
+    Future.microtask(() {
+      if (!_ref.read(adInitializationProvider)) {
+        _ref.read(adInitializationProvider.notifier).state = true;
+      }
+    });
   }
 
   void _preloadAllAds() {
@@ -61,37 +93,105 @@ class AdService {
     _preloadRewarded();
   }
 
-  /// Initialize MobileAds with UMP Consent
+  /// Initializes the UMP consent flow and, once consent allows it, the Mobile
+  /// Ads SDK.
+  ///
+  /// The UMP callbacks are not guaranteed to fire on every device, so a
+  /// periodic re-check of `canRequestAds()` acts as a safety net. Without it the
+  /// SDK could stay uninitialized forever and no ad would ever be requested.
   Future<void> initializeConsentAndAds() async {
     log('AdService: SDK initialization started');
-    final params = ConsentRequestParameters(
-      consentDebugSettings: kDebugMode
-          ? ConsentDebugSettings(
-              debugGeography: DebugGeography.debugGeographyEea,
-              testIdentifiers: ['TEST-DEVICE-HASH'], // In a real scenario, use actual test hash
-            )
-          : null,
-    );
+
+    // Configure test devices (debug only) before any ad request is made.
+    if (kDebugMode && debugTestDeviceIds.isNotEmpty) {
+      await MobileAds.instance.updateRequestConfiguration(
+        RequestConfiguration(testDeviceIds: debugTestDeviceIds),
+      );
+      log('AdService: test devices configured: ${debugTestDeviceIds.join(', ')}');
+    }
 
     try {
       ConsentInformation.instance.requestConsentInfoUpdate(
-        params,
+        _consentRequestParameters(),
         () async {
-          if (await ConsentInformation.instance.isConsentFormAvailable()) {
-            _loadConsentForm();
-          } else {
-            await _initializeAds();
-          }
+          log('AdService: Consent info update succeeded');
+          await _continueAfterConsentUpdate();
         },
         (FormError error) async {
-          log('AdService: Consent Info Update failed: ${error.message}');
-          await _initializeAds(); // fallback
+          log('AdService: Consent info update failed: ${error.message}');
+          await _continueAfterConsentUpdate();
         },
       );
     } catch (e) {
       log('AdService: Error during consent request: $e');
-      await _initializeAds();
+      await _continueAfterConsentUpdate();
     }
+
+    // Safety net: keep re-checking the consent state in case none of the
+    // callbacks above ever runs.
+    _scheduleConsentRecheck();
+  }
+
+  ConsentRequestParameters _consentRequestParameters() {
+    if (!kDebugMode || debugTestDeviceIds.isEmpty) {
+      return ConsentRequestParameters();
+    }
+    return ConsentRequestParameters(
+      consentDebugSettings: ConsentDebugSettings(
+        debugGeography: DebugGeography.debugGeographyEea,
+        testIdentifiers: debugTestDeviceIds,
+      ),
+    );
+  }
+
+  /// True when the UMP SDK reports that ads may be requested (consent is either
+  /// not required or has already been obtained).
+  Future<bool> _canRequestAds() async {
+    try {
+      if (await ConsentInformation.instance.canRequestAds()) return true;
+      final status = await ConsentInformation.instance.getConsentStatus();
+      return status == ConsentStatus.notRequired || status == ConsentStatus.obtained;
+    } catch (e) {
+      log('AdService: Consent status check failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _continueAfterConsentUpdate() async {
+    if (_isSdkInitialized) return;
+
+    if (await _canRequestAds()) {
+      log('AdService: Consent allows ad requests, initializing SDK');
+      await _initializeAds();
+      return;
+    }
+
+    if (await ConsentInformation.instance.isConsentFormAvailable()) {
+      log('AdService: Consent required, showing consent form');
+      _loadConsentForm();
+      return;
+    }
+
+    log('AdService: Consent required but no form available, waiting for consent');
+  }
+
+  void _scheduleConsentRecheck() {
+    _consentFallbackTimer?.cancel();
+    _consentFallbackTimer = Timer(_consentRecheckDelay, () async {
+      if (_isSdkInitialized) return;
+
+      if (await _canRequestAds()) {
+        log('AdService: Consent allows ad requests (recheck), initializing SDK');
+        await _initializeAds();
+        return;
+      }
+
+      if (_consentCheckAttempts++ < _maxConsentCheckAttempts) {
+        _scheduleConsentRecheck();
+      } else {
+        log('AdService: Consent still not granted after rechecks, ads stay disabled');
+      }
+    });
   }
 
   void _loadConsentForm() {
@@ -100,38 +200,51 @@ class AdService {
         final status = await ConsentInformation.instance.getConsentStatus();
         if (status == ConsentStatus.required) {
           consentForm.show(
-            (FormError? formError) {
+            (FormError? formError) async {
               if (formError != null) {
                 log('AdService: Consent form show error: ${formError.message}');
               }
-              _loadConsentForm();
+              // Re-evaluate after the form is dismissed instead of showing it
+              // again (the previous code re-entered this method and could loop
+              // forever when the user dismissed the form).
+              await _continueAfterConsentUpdate();
             },
           );
         } else {
-          await _initializeAds();
+          await _continueAfterConsentUpdate();
         }
       },
       (FormError formError) async {
         log('AdService: Consent form load error: ${formError.message}');
-        await _initializeAds();
+        await _continueAfterConsentUpdate();
       },
     );
   }
 
   Future<void> _initializeAds() async {
     if (_isSdkInitialized) return;
+    _consentFallbackTimer?.cancel();
     try {
       await MobileAds.instance.initialize();
       _isSdkInitialized = true;
       log('AdService: SDK initialization completed');
-      
-      // Notify the rest of the app
-      _ref.read(adInitializationProvider.notifier).state = true;
-      
+
+      // Notify the rest of the app so widgets can request their ads.
+      _markSdkInitialized();
+
       // Preload ads immediately after initialization
       _preloadAllAds();
     } catch (e) {
       log('AdService: MobileAds initialization error: $e');
+      // Initialization can fail when the device is offline or while Play services
+      // are updating, so keep retrying for a while instead of leaving the app
+      // without ads for the rest of the session.
+      if (_consentCheckAttempts++ < _maxConsentCheckAttempts) {
+        log('AdService: retrying SDK initialization in ${_consentRecheckDelay.inSeconds}s');
+        _scheduleConsentRecheck();
+      } else {
+        log('AdService: SDK initialization retries exhausted');
+      }
     }
   }
 
@@ -299,7 +412,18 @@ class AdService {
     _scanInterstitialAd!.show();
   }
 
-  void _showRewardedIfAvailable(VoidCallback onContinue) {
+  /// Preloads the QR creation interstitial so it is ready for the next QR
+  /// generation. Safe to call multiple times, the service guards against
+  /// duplicate requests.
+  void preloadQrCreateInterstitialAd() {
+    _preloadQrCreateInterstitial();
+  }
+
+  /// Shows a rewarded ad. Rewarded ads are **opt-in only** according to AdMob
+  /// policy, so this must be triggered from an explicit user action (for example
+  /// a "Watch an ad to unlock" button) and never automatically after a scan or a
+  /// QR creation. [onContinue] runs in every code path.
+  void showRewardedAd(VoidCallback onContinue) {
     if (_isAdShowing || _rewardedAd == null || !_hasInternet() || !_isSdkInitialized) {
       log('AdService: Rewarded unavailable or cannot show, proceeding.');
       onContinue();
@@ -344,21 +468,22 @@ class AdService {
     });
   }
   
+  /// Called after a QR code was created. Shows the QR creation interstitial on
+  /// every generation, then runs [onContinue] (navigation to the preview).
+  ///
+  /// Note: [onContinue] always runs, even when no ad is loaded, so the user is
+  /// never blocked.
   Future<void> onSuccessfulCreate(VoidCallback onContinue) async {
-    int count = await _getCounter(_qrCreationCountKey);
-    count++;
+    final int count = await _getCounter(_qrCreationCountKey) + 1;
     await _incrementCounter(_qrCreationCountKey, count);
-    
+
     log('AdService: QR Create count: $count');
-    
-    if (count % 2 != 0) {
-      _showQrCreateInterstitialIfAvailable(onContinue);
-    } else {
-      _showRewardedIfAvailable(onContinue);
-    }
+
+    _showQrCreateInterstitialIfAvailable(onContinue);
   }
 
-  /// Called on successful scans. Will trigger rewarded every 2nd scan.
+  /// Called after a successful scan. Shows the scan interstitial ad on every
+  /// second scan to stay within AdMob's interstitial frequency rules.
   Future<void> onSuccessfulScan(VoidCallback onContinue) async {
     int count = await _getCounter(_successfulScanCountKey);
     count++;
@@ -367,19 +492,23 @@ class AdService {
     log('AdService: Scan count: $count');
     
     if (count % 2 == 0) {
-      _showRewardedIfAvailable(onContinue);
+      _showScanInterstitialIfAvailable(onContinue);
     } else {
       onContinue();
     }
   }
 
+  /// Creates and loads a banner ad.
+  ///
+  /// Returns `null` when the SDK is not ready or the device is offline; callers
+  /// must retry once the [adInitializationProvider] reports the SDK as ready.
   BannerAd? createBannerAd(VoidCallback onLoaded, void Function(LoadAdError) onFailed) {
     if (!_isSdkInitialized || !_hasInternet()) {
       log('AdService: Banner creation skipped (Internet: ${_hasInternet()}, SDK: $_isSdkInitialized)');
       return null;
     }
 
-    log('AdService: Banner ad request started');
+    log('AdService: Banner ad request started (unit: ${AdUnits.banner})');
     return BannerAd(
       adUnitId: AdUnits.banner,
       size: AdSize.banner,
@@ -390,7 +519,7 @@ class AdService {
           onLoaded();
         },
         onAdFailedToLoad: (ad, error) {
-          log('AdService: Banner ad failed to load: $error');
+          log('AdService: Banner ad failed to load: ${error.code} ${error.message}');
           log('AdService: Banner ad object disposed due to load failure');
           ad.dispose();
           onFailed(error);

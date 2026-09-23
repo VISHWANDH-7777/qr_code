@@ -5,9 +5,11 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import '../services/ad_service.dart';
 import '../services/ad_state_provider.dart';
+import '../services/connectivity_service.dart';
 import '../services/rate_service.dart';
 import '../../features/rating/rate_popup.dart';
 import 'dart:async';
+import 'dart:developer' show log;
 
 import '../../features/home/home_screen.dart';
 import '../../features/scanner/scanner_screen.dart';
@@ -118,12 +120,21 @@ class ScaffoldWithNavBar extends ConsumerStatefulWidget {
 class _ScaffoldWithNavBarState extends ConsumerState<ScaffoldWithNavBar> {
   BannerAd? _bannerAd;
   bool _isAdLoaded = false;
+  bool _isBannerLoading = false;
+  int _bannerRetryCount = 0;
+  static const int _maxBannerRetries = 5;
   Timer? _ratePromptTimer;
 
   @override
   void initState() {
     super.initState();
     _startRatePromptTimer();
+
+    // The ads SDK is initialized while the app shell is being created, so it can
+    // already be ready before this widget exists. `ref.listen` never fires for a
+    // value that changed before the listener was registered, therefore the banner
+    // is also requested once here.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadBannerAd());
   }
 
   void _startRatePromptTimer() {
@@ -142,39 +153,73 @@ class _ScaffoldWithNavBarState extends ConsumerState<ScaffoldWithNavBar> {
   }
 
   void _loadBannerAd() {
+    if (!mounted || _isAdLoaded || _isBannerLoading) return;
+
     final adService = ref.read(adServiceProvider);
-    _bannerAd = adService.createBannerAd(
+    final ad = adService.createBannerAd(
       () {
-        if (mounted) setState(() => _isAdLoaded = true);
+        if (!mounted) return;
+        setState(() {
+          _isBannerLoading = false;
+          _isAdLoaded = true;
+        });
       },
       (error) {
-        if (mounted) {
-          setState(() => _isAdLoaded = false);
-          // Retry loading after a delay
-          Future.delayed(const Duration(seconds: 30), () {
-            if (mounted && !_isAdLoaded) {
-              _bannerAd?.dispose();
-              _loadBannerAd();
-            }
-          });
-        }
+        if (!mounted) return;
+        setState(() {
+          _isBannerLoading = false;
+          _isAdLoaded = false;
+          _bannerAd = null;
+        });
+        _scheduleBannerRetry(error.message);
       },
     );
+
+    if (ad == null) {
+      // The SDK is not ready yet (or the device is offline). The
+      // adInitializationProvider listener retries as soon as it becomes ready.
+      return;
+    }
+
+    _isBannerLoading = true;
+    _bannerAd = ad;
+  }
+
+  void _scheduleBannerRetry(String reason) {
+    if (_bannerRetryCount >= _maxBannerRetries) {
+      log('AdService: banner retries exhausted ($reason)');
+      return;
+    }
+
+    _bannerRetryCount++;
+    final delay = Duration(seconds: 15 * _bannerRetryCount);
+    log('AdService: banner retry $_bannerRetryCount scheduled in ${delay.inSeconds}s ($reason)');
+
+    Future.delayed(delay, () {
+      if (mounted && !_isAdLoaded) _loadBannerAd();
+    });
   }
 
   @override
   void dispose() {
     _ratePromptTimer?.cancel();
     _bannerAd?.dispose();
+    _bannerAd = null;
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Load the banner as soon as the SDK is ready, and retry when the device
+    // comes back online. `WidgetRef.listen` has no `fireImmediately`, so the
+    // case where the SDK became ready before this widget existed is handled by
+    // the post frame callback in `initState`.
     ref.listen<bool>(adInitializationProvider, (previous, next) {
-      if (next && !_isAdLoaded && _bannerAd == null) {
-        _loadBannerAd();
-      }
+      if (next) _loadBannerAd();
+    });
+
+    ref.listen<InternetStatus>(internetStatusProvider, (previous, next) {
+      if (next == InternetStatus.connected) _loadBannerAd();
     });
 
     return Scaffold(
