@@ -2,13 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/providers/history_provider.dart';
+import '../../core/services/key_service_provider.dart';
+import '../../core/services/ad_service.dart';
 
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  bool _isAdLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
     final historyItems = ref.watch(historyProvider);
+    final scanKeys = ref.watch(scanKeysProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -20,6 +30,15 @@ class HomeScreen extends ConsumerWidget {
           ],
         ),
         actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+              child: Chip(
+                label: Text('$scanKeys Keys'),
+                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+              ),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
@@ -32,14 +51,47 @@ class HomeScreen extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Primary Action
-            ElevatedButton.icon(
-              onPressed: () => context.go('/scan'),
-              icon: const Icon(Icons.qr_code_scanner, size: 32),
-              label: const Text('Scan QR or Barcode', style: TextStyle(fontSize: 18)),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 24),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => context.go('/scan'),
+                    icon: const Icon(Icons.qr_code_scanner, size: 24),
+                    label: const Text('Scan QR or\nBarcode', textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isAdLoading ? null : () {
+                      setState(() => _isAdLoading = true);
+                      ref.read(adServiceProvider).showRewardedForScanKeys(
+                        () {
+                          if (mounted) setState(() => _isAdLoading = false);
+                        },
+                        () {
+                          if (mounted) {
+                            setState(() => _isAdLoading = false);
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ad is currently unavailable. Please try again later.')));
+                          }
+                        }
+                      );
+                    },
+                    icon: _isAdLoading ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.play_circle_outline, size: 24),
+                    label: const Text('View Ad for\n5 Keys', textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                      foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/services/ad_service.dart';
+import '../../core/services/key_service_provider.dart';
 
 class QRFormScreen extends ConsumerStatefulWidget {
   final String type;
@@ -14,6 +15,7 @@ class QRFormScreen extends ConsumerStatefulWidget {
 
 class _QRFormScreenState extends ConsumerState<QRFormScreen> {
   final _formKey = GlobalKey<FormState>();
+  bool _isAdLoading = false;
   
   // Basic controllers
   final _urlController = TextEditingController();
@@ -183,9 +185,22 @@ class _QRFormScreenState extends ConsumerState<QRFormScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final createKeys = ref.watch(createKeysProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Create ${widget.type.toUpperCase()} QR'),
+        actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Chip(
+                label: Text('$createKeys Keys'),
+                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+              ),
+            ),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
@@ -204,9 +219,46 @@ class _QRFormScreenState extends ConsumerState<QRFormScreen> {
               const SizedBox(height: 24),
               _buildFormFields(),
               const SizedBox(height: 32),
-              ElevatedButton(
-                onPressed: _generateQR,
-                child: const Text('Generate QR Code'),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _generateQR,
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      ),
+                      child: const Text('Create QR', style: TextStyle(fontSize: 16)),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isAdLoading ? null : () {
+                        setState(() => _isAdLoading = true);
+                        ref.read(adServiceProvider).showRewardedForCreateKeys(
+                          () {
+                            if (mounted) setState(() => _isAdLoading = false);
+                          },
+                          () {
+                            if (mounted) {
+                              setState(() => _isAdLoading = false);
+                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ad is currently unavailable. Please try again later.')));
+                            }
+                          }
+                        );
+                      },
+                      icon: _isAdLoading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.play_circle_outline, size: 20),
+                      label: const Text('View Ad for\n2 Keys', textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                        foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

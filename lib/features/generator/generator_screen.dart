@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/services/key_service_provider.dart';
 
-class GeneratorScreen extends StatelessWidget {
+class GeneratorScreen extends ConsumerWidget {
   const GeneratorScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final createKeys = ref.watch(createKeysProvider);
+    
     final types = [
       {'title': 'Website', 'icon': Icons.language, 'type': 'website'},
       {'title': 'Text', 'icon': Icons.text_snippet, 'type': 'text'},
@@ -16,7 +20,20 @@ class GeneratorScreen extends StatelessWidget {
     ];
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Create QR Code')),
+      appBar: AppBar(
+        title: const Text('Create QR Code'),
+        actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Chip(
+                label: Text('$createKeys Keys'),
+                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
       body: GridView.builder(
         padding: const EdgeInsets.all(16),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(

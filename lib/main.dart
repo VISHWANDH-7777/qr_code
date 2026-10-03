@@ -13,8 +13,15 @@ import 'core/services/connectivity_service.dart';
 import 'core/services/ad_service.dart';
 import 'screens/no_internet_screen.dart';
 
+import 'package:flutter/services.dart';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+  // Initialize Mobile Ads SDK exactly once during application startup
+  await AdService.initializeAds();
 
   // Initialize Hive
   await Hive.initFlutter();
